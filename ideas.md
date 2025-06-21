@@ -49,3 +49,5 @@ un -> [t1, t2, ..., t60, ..., t75]
 start -> relative movement -> geobleu evaluieren -> with relative vervollständigen
 
 4 6 10 22
+
+2. mit gaussian top_n kandidaten evalieren
