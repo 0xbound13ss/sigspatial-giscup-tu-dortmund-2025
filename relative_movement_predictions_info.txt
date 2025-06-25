@@ -1,0 +1,53 @@
+RELATIVE MOVEMENT PREDICTION RESULTS
+==================================================
+
+User 22001:
+  Best match: User 26
+  Similarity: 0.18398
+  Trajectory length: 721
+
+User 22002:
+  Best match: User 22
+  Similarity: 0.30797
+  Trajectory length: 721
+
+User 22003:
+  Best match: User 44
+  Similarity: 0.09667
+  Trajectory length: 721
+
+User 22004:
+  Best match: User 6
+  Similarity: 0.31739
+  Trajectory length: 721
+
+User 22005:
+  Best match: User 6
+  Similarity: 0.49657
+  Trajectory length: 721
+
+User 22006:
+  Best match: User 37
+  Similarity: 0.22474
+  Trajectory length: 721
+
+User 22007:
+  Best match: User 37
+  Similarity: 0.15174
+  Trajectory length: 721
+
+User 22008:
+  Best match: User 47
+  Similarity: 0.06650
+  Trajectory length: 721
+
+User 22009:
+  Best match: User 6
+  Similarity: 0.33503
+  Trajectory length: 721
+
+User 22010:
+  Best match: User 37
+  Similarity: 0.11133
+  Trajectory length: 721
+
