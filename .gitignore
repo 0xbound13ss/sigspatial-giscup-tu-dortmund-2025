@@ -4,3 +4,5 @@ papers/
 bachelorarbeit/expose-beispiele/
 user_visualizations/
 .DS_Store
+*.parquet
+**/__pycache__/
