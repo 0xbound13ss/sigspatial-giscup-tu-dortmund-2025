@@ -4,6 +4,7 @@ from tqdm import tqdm
 import time
 from config import settings
 from geobleu_optimized import geobleu_by_day
+from sklearn.mixture import GaussianMixture
 
 
 END_TS = settings.TIMESTAMPS_PER_DAY * settings.TRAIN_DAYS - 1
@@ -43,67 +44,112 @@ def precompute_base_trajectories(base_movements_df):
     return base_trajectories
 
 
-def find_most_similar_user(query_uid, base_uids, base_movements_df):
-    """Find most similar user using GEO-BLEU on relative movements"""
+def find_top_similar_users(query_uid, base_trajectories, base_movements_df, top_k=5):
+    """Find top K most similar users using GEO-BLEU on relative movements"""
     query_movements = base_movements_df[(base_movements_df["uid"] == query_uid)]
-    best_similarity = -1
-    best_uid = None
-    for base_uid in tqdm(base_uids, desc=f"Finding similar user for {query_uid}"):
-        base_movements = base_movements_df[(base_movements_df["uid"] == base_uid)]
+    query_trajectory = query_movements[["day", "time", "dx", "dy"]].values.tolist()
+    similarities = []
+
+    base_users = base_movements_df["uid"].max() - settings.TEST_USERS
+
+    for base_uid in tqdm(
+        list(range(1, base_users + 1)),
+        desc=f"Finding similar users for {query_uid}",
+    ):
+        base_trajectory = base_trajectories[base_uid]
         similarity = geobleu_by_day(
-            pred_traj=query_movements[["day", "time", "dx", "dy"]].values.tolist(),
-            ref_traj=base_movements[["day", "time", "dx", "dy"]].values.tolist(),
+            pred_traj=query_trajectory,
+            ref_traj=base_trajectory,
         )
-        if similarity > best_similarity:
-            best_similarity = similarity
-            best_uid = base_uid
-    return best_uid, best_similarity
+        similarities.append((base_uid, similarity))
+
+    similarities.sort(key=lambda x: x[1], reverse=True)
+    return similarities[:top_k]
 
 
-# def get_extension_movements(best_uid, extension_movements_df):
-#     """Get extension movements from most similar user"""
+def get_extension_movements(uid, extension_movements_df):
+    """Get extension movements from a user for prediction period"""
+    extension_movements = extension_movements_df[
+        (extension_movements_df["uid"] == uid)
+    ].sort_values("ts")
 
-#     # Get movements from ts=2800 onwards (prediction period)
-#     extension_movements = extension_movements_df[
-#         (extension_movements_df["uid"] == best_uid)
-#         & (extension_movements_df["ts"] > 2799)
-#     ].sort_values("ts")
+    if len(extension_movements) == 0:
+        return np.array([])
 
-#     if len(extension_movements) == 0:
-#         return np.array([])
-
-#     return extension_movements[["dx", "dy"]].values
+    return extension_movements[["dx", "dy"]].values
 
 
-# def apply_movements_to_coordinates(
-#     df, query_uid, predicted_movements, train_end_ts=2799
-# ):
-#     """Apply predicted movements to get final coordinates"""
+def blend_movements_with_gmm(movement_sets, n_components=2):
+    """
+    Blend multiple movement sets using Gaussian Mixture Model
 
-#     # Get last training coordinate
-#     last_coord = df[(df["uid"] == query_uid) & (df["ts"] == train_end_ts)][
-#         ["x", "y"]
-#     ].values
+    Args:
+        movement_sets: List of movement arrays from different users
+        n_components: Number of Gaussian components for GMM
 
-#     if len(last_coord) == 0:
-#         print(f"No training data found for user {query_uid} at ts={train_end_ts}")
-#         return pd.DataFrame()
+    Returns:
+        Sampled movements from the fitted GMM
+    """
+    if not movement_sets or all(len(moves) == 0 for moves in movement_sets):
+        return np.array([])
 
-#     last_coord = last_coord[0].astype(float)
+    # Combine all movements
+    all_movements = np.vstack([moves for moves in movement_sets if len(moves) > 0])
 
-#     # Apply movements
-#     results = []
-#     current_coord = last_coord.copy()
+    if len(all_movements) == 0:
+        return np.array([])
 
-#     for i, movement in enumerate(predicted_movements):
-#         current_coord += movement
-#         ts = train_end_ts + 1 + i
+    # Fit GMM
+    n_components = min(n_components, len(all_movements))
+    gmm = GaussianMixture(
+        n_components=n_components, covariance_type="full", random_state=42
+    )
+    gmm.fit(all_movements)
 
-#         results.append(
-#             {"uid": query_uid, "ts": ts, "x": current_coord[0], "y": current_coord[1]}
-#         )
+    max_length = max(len(moves) for moves in movement_sets)
 
-#     return pd.DataFrame(results)
+    # Sample from GMM
+    sampled_movements, _ = gmm.sample(max_length)
+
+    return sampled_movements
+
+
+def apply_movements_to_coordinates(
+    df, query_uid, predicted_movements, train_end_ts=END_TS
+):
+    """Apply predicted movements to get final coordinates"""
+    # Get last training coordinate
+    last_coord = df[(df["uid"] == query_uid) & (df["ts"] == train_end_ts)][
+        ["x", "y"]
+    ].values
+
+    last_coord = last_coord[0].astype(float)
+
+    results = []
+    current_coord = last_coord.copy()
+
+    for i, movement in enumerate(predicted_movements):
+        current_coord += movement
+
+        # Clip coordinates to valid range [1, 200]
+        current_coord = np.clip(current_coord, 1, 200)
+
+        ts = train_end_ts + 1 + i
+        day = ts // 48 + 1
+        time_slot = ts % 48
+
+        results.append(
+            {
+                "uid": query_uid,
+                "ts": ts,
+                "day": day,
+                "time": time_slot,
+                "x": current_coord[0],
+                "y": current_coord[1],
+            }
+        )
+
+    return pd.DataFrame(results)
 
 
 def main():
@@ -114,7 +160,6 @@ def main():
 
     # Define users
     query_uids = list(range(27001, 27011))  # First 10 users
-    base_uids = list(range(1, 27001))  # All base users
 
     # Compute relative movements as DataFrame
     movements_df = compute_relative_movements_df(df)
@@ -126,29 +171,67 @@ def main():
     base_movements_df = movements_df[
         (movements_df["ts"] >= 1) & (movements_df["ts"] <= END_TS)
     ]
+    extension_movements_df = movements_df[movements_df["ts"] > END_TS]
+
     base_trajectories = precompute_base_trajectories(base_movements_df)
     print(f"Pre-computed trajectories for {len(base_trajectories)} base users")
+
+    all_predictions = []
 
     for query_uid in query_uids:
         print(f"\n=== Predicting for user {query_uid} ===")
 
-        # Find most similar user (top-1)
-        best_uid, similarity = find_most_similar_user(
-            query_uid, base_uids, base_movements_df
+        top_similar = find_top_similar_users(
+            query_uid, base_trajectories, base_movements_df, top_k=5
         )
 
-        print(f"Most similar user: {best_uid} (GEO-BLEU: {similarity:.6f})")
+        print("Top 5 similar users:")
+        for uid, similarity in top_similar:
+            print(f"  User {uid}: GEO-BLEU = {similarity:.6f}")
 
-        # predicted_movements = get_extension_movements(best_uid, extension_movements_df)
+        # Get extension movements from top 5 users
+        movement_sets = []
+        for uid, similarity in top_similar:
+            movements = get_extension_movements(uid, extension_movements_df)
+            if len(movements) > 0:
+                movement_sets.append(movements)
+                print(f"User {uid}: {len(movements)} extension movements")
 
-        # print(
-        #     f"Using {len(predicted_movements)} extension movements from user {best_uid}"
-        # )
+        if not movement_sets:
+            print(f"No extension movements found for user {query_uid}")
+            continue
+
+        print("Blending movements with GMM...")
+        blended_movements = blend_movements_with_gmm(movement_sets, n_components=2)
+        print(f"Generated {len(blended_movements)} blended movements")
 
         # Convert to coordinates
-        # user_predictions = apply_movements_to_coordinates(
-        #     df, query_uid, predicted_movements
-        # )
+        user_predictions = apply_movements_to_coordinates(
+            df, query_uid, blended_movements
+        )
+
+        print(f"Generated {len(user_predictions)} coordinate predictions")
+        print(
+            f"Coordinate range: X=[{user_predictions['x'].min():.1f}, {user_predictions['x'].max():.1f}], "
+            f"Y=[{user_predictions['y'].min():.1f}, {user_predictions['y'].max():.1f}]"
+        )
+        all_predictions.append(user_predictions)
+
+    # Combine all predictions
+    if all_predictions:
+        final_predictions = pd.concat(all_predictions, ignore_index=True)
+        print(f"\n=== Final Results ===")
+        print(f"Total predictions: {len(final_predictions)}")
+        print(f"Users predicted: {final_predictions['uid'].nunique()}")
+
+        # Save predictions
+        output_file = "gmm_predictions.csv"
+        final_predictions[["uid", "day", "time", "x", "y"]].to_csv(
+            output_file, index=False, float_format="%.0f"
+        )
+        print(f"Predictions saved to {output_file}")
+    else:
+        print("No predictions generated for any user")
 
 
 if __name__ == "__main__":
