@@ -12,10 +12,12 @@ sstart = time.time()
 # columns: uid,d,t,x,y
 # 1. Load original .csv
 # Filter out 999 x,y values
+# Filter out rows with NaN values in x,y
 # Convert to ts and drop d,t columns
 df = pd.read_csv(file_in, dtype=int)
 df["d"] = df["d"] - 1
 df = df[(df["x"] != 999) & (df["y"] != 999)]
+df = df.dropna(subset=["x", "y"])
 df["ts"] = df["d"] * 48 + df["t"]
 df = df.drop(["d", "t"], axis=1)
 
@@ -34,8 +36,10 @@ start_time = time.time()
 
 # 2. Add ts=0 and ts=3599 points for train users:
 max_ts = settings.TIMESTAMPS_PER_DAY * settings.ALL_DAYS - 1  # should be 3599
-train_users = range(1, df["uid"].max() - settings.TEST_USERS + 1)
-train_df = df[df["uid"].isin(train_users)]
+# train_users = range(1, df["uid"].max() - settings.TEST_USERS + 1)
+# train_df = df[df["uid"].isin(train_users)]
+# Temporarily use all users
+train_df = df
 
 # - Get the last record for each user
 # - Filter users whose last ts is not max_ts
