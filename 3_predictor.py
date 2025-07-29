@@ -2,207 +2,279 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 import time
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from config import settings
-from geobleu_optimized import geobleu_by_day
+from utils import (
+    get_algo,
+    get_xy_list_from_df_simple,
+)
 from sklearn.mixture import GaussianMixture
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+df = None
 
 
 END_TS = settings.TIMESTAMPS_PER_DAY * settings.TRAIN_DAYS - 1
 
 
-def compute_relative_movements_df(df):
-    """Convert absolute coordinates to relative movement vectors, return as DataFrame"""
-    relative_start_time = time.time()
-    print("Computing relative movements...")
-    df_sorted = df.sort_values(["uid", "ts"])
-    df_sorted[["dx", "dy"]] = df_sorted.groupby("uid")[["x", "y"]].diff()
-    movements_df = df_sorted.dropna(subset=["dx", "dy"]).copy()
-    movements_df = movements_df[["uid", "ts", "dx", "dy"]].reset_index(drop=True)
-    movements_df["day"] = movements_df["ts"] // 48 + 1
-    movements_df["time"] = movements_df["ts"] % 48
-    print(
-        f"Computed relative movements in {time.time() - relative_start_time:.2f} seconds"
-    )
-    return movements_df
-
-
-def precompute_base_trajectories(base_movements_df):
-    """Pre-compute trajectories for all base users for efficiency"""
-    print("Pre-computing base user trajectories...")
-    precompute_start = time.time()
-
-    # Filter to only base users at once
-    base_users = base_movements_df["uid"].max() - settings.TEST_USERS
-    base_only_df = base_movements_df[base_movements_df["uid"] < base_users]
-
-    # Group by uid and convert to dict of lists in one operation
-    base_trajectories = {}
-    for uid, group in tqdm(base_only_df.groupby("uid"), desc="Processing base users"):
-        base_trajectories[uid] = group[["day", "time", "dx", "dy"]].values.tolist()
-
-    print(f"Pre-computed trajectories in {time.time() - precompute_start:.2f} seconds")
-    return base_trajectories
-
-
-def find_top_similar_users(query_uid, base_trajectories, base_movements_df, top_k=5):
-    """Find top K most similar users using GEO-BLEU on relative movements"""
-    query_movements = base_movements_df[(base_movements_df["uid"] == query_uid)]
-    query_trajectory = query_movements[["day", "time", "dx", "dy"]].values.tolist()
-    similarities = []
-
-    base_users = base_movements_df["uid"].max() - settings.TEST_USERS
-
-    for base_uid in tqdm(
-        list(range(1, base_users + 1)),
-        desc=f"Finding similar users for {query_uid}",
-    ):
-        base_trajectory = base_trajectories[base_uid]
-        similarity = geobleu_by_day(
-            pred_traj=query_trajectory,
-            ref_traj=base_trajectory,
+def blend_extension_movements_with_gmm(uids, n_components=2):
+    xy_s = [
+        get_xy_list_from_df_simple(
+            df[df["uid"] == uid][df["day"] > settings.TRAIN_DAYS]
         )
-        similarities.append((base_uid, similarity))
+        for uid in uids
+    ]
 
-    similarities.sort(key=lambda x: x[1], reverse=True)
-    return similarities[:top_k]
+    for i, _ in enumerate(xy_s):
+        first_pos = xy_s[i][0]
+        for j in range(1, len(xy_s[i])):
+            xy_s[i][j] = (
+                xy_s[i][j][0] - first_pos[0],
+                xy_s[i][j][1] - first_pos[1],
+            )
+        xy_s[i][0] = (0, 0)
+
+    # Blend corresponding positions across users
+    max_length = max(len(moves) for moves in xy_s)
+    predicted_movements = []
+
+    for pos in range(max_length):
+        positions = [xy_s[i][pos] for i in range(len(xy_s)) if pos < len(xy_s[i])]
+        if len(positions) > 1:
+            # positions = [(x1, y1), (x2, y2), ..., (x5, y5)]
+            positions_array = np.array(positions)
+            gmm = GaussianMixture(
+                n_components=min(n_components, len(positions)), random_state=42
+            )
+            gmm.fit(positions_array)
+            sampled_position, _ = gmm.sample(1)
+            predicted_movements.append(sampled_position[0])
+        elif len(positions) == 1:
+            predicted_movements.append(positions[0])
+
+    return np.array(predicted_movements)
 
 
-def get_extension_movements(uid, extension_movements_df):
-    """Get extension movements from a user for prediction period"""
-    extension_movements = extension_movements_df[
-        (extension_movements_df["uid"] == uid)
-    ].sort_values("ts")
-
-    if len(extension_movements) == 0:
-        return np.array([])
-
-    return extension_movements[["dx", "dy"]].values
-
-
-def blend_movements_with_gmm(movement_sets, n_components=2):
-    """
-    Blend multiple movement sets using Gaussian Mixture Model
-
-    Args:
-        movement_sets: List of movement arrays from different users
-        n_components: Number of Gaussian components for GMM
-
-    Returns:
-        Sampled movements from the fitted GMM
-    """
-    if not movement_sets or all(len(moves) == 0 for moves in movement_sets):
-        return np.array([])
-
-    # Combine all movements
-    all_movements = np.vstack([moves for moves in movement_sets if len(moves) > 0])
-
-    if len(all_movements) == 0:
-        return np.array([])
-
-    # Fit GMM
-    n_components = min(n_components, len(all_movements))
-    gmm = GaussianMixture(
-        n_components=n_components, covariance_type="full", random_state=42
+def apply_movements_to_coordinates(df, query_uid, predicted_movements):
+    last_coord = (
+        df[(df["uid"] == query_uid) & (df["ts"] == END_TS)][["x", "y"]]
+        .values[0]
+        .astype(float)
     )
-    gmm.fit(all_movements)
-
-    max_length = max(len(moves) for moves in movement_sets)
-
-    # Sample from GMM
-    sampled_movements, _ = gmm.sample(max_length)
-
-    return sampled_movements
-
-
-def apply_movements_to_coordinates(
-    df, query_uid, predicted_movements, train_end_ts=END_TS
-):
-    """Apply predicted movements to get final coordinates"""
-    # Get last training coordinate
-    last_coord = df[(df["uid"] == query_uid) & (df["ts"] == train_end_ts)][
-        ["x", "y"]
-    ].values
-
-    last_coord = last_coord[0].astype(float)
-
     results = []
     current_coord = last_coord.copy()
-
     for i, movement in enumerate(predicted_movements):
         current_coord += movement
-
-        # Clip coordinates to valid range [1, 200]
         current_coord = np.clip(current_coord, 1, 200)
-
-        ts = train_end_ts + 1 + i
-        day = ts // 48 + 1
-        time_slot = ts % 48
-
+        ts = END_TS + 1 + i
         results.append(
             {
                 "uid": query_uid,
                 "ts": ts,
-                "day": day,
-                "time": time_slot,
+                "day": ts // 48 + 1,
+                "time": ts % 48,
                 "x": current_coord[0],
                 "y": current_coord[1],
             }
         )
-
     return pd.DataFrame(results)
+
+
+def calculate_user_similarity(train_uid, query_user):
+    """Calculate similarity between query user and a single training user"""
+    cur = []
+    train_user = df[df["uid"] == train_uid]
+    for day in range(1, 61):
+        query_user_day = query_user[query_user["day"] == day].sort_values("ts")
+        train_user_day = train_user[train_user["day"] == day].sort_values("ts")
+        q_xy = get_xy_list_from_df_simple(query_user_day)
+        t_xy = get_xy_list_from_df_simple(train_user_day)
+        similarity = get_algo()((q_xy, t_xy))
+        cur.append(similarity)
+
+    # Keep only elements in 25-75 percentile and get mean
+    cur = np.array(cur)
+    q25, q75 = np.percentile(cur, [25, 75])
+    filtered_similarities = cur[(cur >= q25) & (cur <= q75)]
+    similarity = np.mean(filtered_similarities)
+
+    return (similarity, train_uid)
+
+
+def find_top_similar_users(query_uid, top_k=5):
+    """Find top K most similar users using GEO-BLEU with multithreading"""
+    query_user = df[df["uid"] == query_uid]
+    train_users_max = 27000
+    train_uids = list(range(1, train_users_max))
+
+    similarities = []
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_uid = {
+            executor.submit(calculate_user_similarity, train_uid, query_user): train_uid
+            for train_uid in train_uids
+        }
+
+        for future in tqdm(
+            as_completed(future_to_uid),
+            total=len(train_uids),
+            desc=f"Finding similar users for {query_uid}",
+        ):
+            train_uid = future_to_uid[future]
+            try:
+                similarity, uid = future.result()
+                similarities.append((similarity, uid))
+                print(f"Calculated: {similarity:.6f} for user {uid}")
+            except Exception as exc:
+                print(f"User {train_uid} generated an exception: {exc}")
+
+    similarities.sort()
+    return similarities[:top_k]
+
+
+def visualize_user_paths(query_uid, similar_users, save_path=None):
+    """
+    Visualize the paths of the query user and its 5 most similar users
+
+    Args:
+        query_uid: The query user ID
+        similar_users: List of (similarity_score, uid) tuples for similar users
+        save_path: Optional path to save the plot
+    """
+    plt.figure(figsize=(12, 10))
+
+    # Define colors for different users
+    colors = ["red", "blue", "green", "orange", "purple", "cyan"]
+
+    # Plot query user path
+    query_user_data = df[df["uid"] == query_uid]
+    query_train_data = query_user_data[query_user_data["day"] <= settings.TRAIN_DAYS]
+    query_xy = get_xy_list_from_df_simple(query_train_data.sort_values("ts"))
+
+    if query_xy:
+        x_coords, y_coords = zip(*query_xy)
+        plt.plot(
+            x_coords,
+            y_coords,
+            color=colors[0],
+            linewidth=3,
+            label=f"Query User {query_uid}",
+            alpha=0.8,
+        )
+        plt.scatter(
+            x_coords[0],
+            y_coords[0],
+            color=colors[0],
+            s=100,
+            marker="o",
+            edgecolor="black",
+            linewidth=2,
+            label=f"Start {query_uid}",
+        )
+        plt.scatter(
+            x_coords[-1],
+            y_coords[-1],
+            color=colors[0],
+            s=100,
+            marker="s",
+            edgecolor="black",
+            linewidth=2,
+            label=f"End {query_uid}",
+        )
+
+    # Plot similar users' paths
+    for i, (similarity, uid) in enumerate(similar_users[:5]):
+        if i + 1 < len(colors):
+            color = colors[i + 1]
+            user_data = df[df["uid"] == uid]
+            user_train_data = user_data[user_data["day"] <= settings.TRAIN_DAYS]
+            user_xy = get_xy_list_from_df_simple(user_train_data.sort_values("ts"))
+
+            if user_xy:
+                x_coords, y_coords = zip(*user_xy)
+                plt.plot(
+                    x_coords,
+                    y_coords,
+                    color=color,
+                    linewidth=2,
+                    label=f"Similar User {uid} " f"(GEO-BLEU: {similarity:.4f})",
+                    alpha=0.7,
+                )
+                plt.scatter(
+                    x_coords[0],
+                    y_coords[0],
+                    color=color,
+                    s=60,
+                    marker="o",
+                    edgecolor="black",
+                    linewidth=1,
+                )
+                plt.scatter(
+                    x_coords[-1],
+                    y_coords[-1],
+                    color=color,
+                    s=60,
+                    marker="s",
+                    edgecolor="black",
+                    linewidth=1,
+                )
+
+    plt.xlim(settings.MIN_X, settings.MAX_X)
+    plt.ylim(settings.MIN_Y, settings.MAX_Y)
+    plt.xlabel("X Coordinate")
+    plt.ylabel("Y Coordinate")
+    plt.title(f"Movement Paths: Query User {query_uid} and Top 5 Similar Users")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Visualization saved to {save_path}")
+    else:
+        save_file = f"user_{query_uid}_similarity_paths.png"
+        plt.savefig(save_file, dpi=300, bbox_inches="tight")
+        print(f"Visualization saved to {save_file}")
+
+    plt.show()
+    plt.close()
 
 
 def main():
     # Load data
+    global df
     print("Loading dataset...")
     df = pd.read_parquet("city_B_challengedata_converted.parquet")
     print(f"Loaded {len(df):,} rows")
 
+    df["day"] = df["ts"] // 48 + 1
+    df["time"] = df["ts"] % 48
+
     # Define users
     query_uids = list(range(27001, 27011))  # First 10 users
-
-    # Compute relative movements as DataFrame
-    movements_df = compute_relative_movements_df(df)
-    print(f"Computed {len(movements_df):,} movement vectors")
-    print(
-        f"Movement ts range: {movements_df['ts'].min()} to {movements_df['ts'].max()}"
-    )
-
-    base_movements_df = movements_df[
-        (movements_df["ts"] >= 1) & (movements_df["ts"] <= END_TS)
-    ]
-    extension_movements_df = movements_df[movements_df["ts"] > END_TS]
-
-    base_trajectories = precompute_base_trajectories(base_movements_df)
-    print(f"Pre-computed trajectories for {len(base_trajectories)} base users")
-
     all_predictions = []
+
+    pred_df = df.copy()
 
     for query_uid in query_uids:
         print(f"\n=== Predicting for user {query_uid} ===")
 
-        top_similar = find_top_similar_users(
-            query_uid, base_trajectories, base_movements_df, top_k=5
-        )
+        top_similar = find_top_similar_users(query_uid, top_k=5)
 
         print("Top 5 similar users:")
-        for uid, similarity in top_similar:
+        for similarity, uid in top_similar:
             print(f"  User {uid}: GEO-BLEU = {similarity:.6f}")
 
-        # Get extension movements from top 5 users
-        movement_sets = []
-        for uid, similarity in top_similar:
-            movements = get_extension_movements(uid, extension_movements_df)
-            if len(movements) > 0:
-                movement_sets.append(movements)
-                print(f"User {uid}: {len(movements)} extension movements")
-
-        if not movement_sets:
-            print(f"No extension movements found for user {query_uid}")
-            continue
+        # Visualize the paths
+        print("Creating visualization...")
+        visualize_user_paths(query_uid, top_similar)
 
         print("Blending movements with GMM...")
-        blended_movements = blend_movements_with_gmm(movement_sets, n_components=2)
+        blended_movements = blend_extension_movements_with_gmm(
+            [uid for _, uid in top_similar], n_components=2
+        )
         print(f"Generated {len(blended_movements)} blended movements")
 
         # Convert to coordinates
@@ -210,28 +282,14 @@ def main():
             df, query_uid, blended_movements
         )
 
-        print(f"Generated {len(user_predictions)} coordinate predictions")
-        print(
-            f"Coordinate range: X=[{user_predictions['x'].min():.1f}, {user_predictions['x'].max():.1f}], "
-            f"Y=[{user_predictions['y'].min():.1f}, {user_predictions['y'].max():.1f}]"
-        )
         all_predictions.append(user_predictions)
 
-    # Combine all predictions
-    if all_predictions:
-        final_predictions = pd.concat(all_predictions, ignore_index=True)
-        print(f"\n=== Final Results ===")
-        print(f"Total predictions: {len(final_predictions)}")
-        print(f"Users predicted: {final_predictions['uid'].nunique()}")
+    # Add all_predictions to pred_df
+    pred_df = pd.concat([pred_df] + all_predictions, ignore_index=True)
+    pred_df.to_parquet("predictions.parquet", index=False)
 
-        # Save predictions
-        output_file = "gmm_predictions.csv"
-        final_predictions[["uid", "day", "time", "x", "y"]].to_csv(
-            output_file, index=False, float_format="%.0f"
-        )
-        print(f"Predictions saved to {output_file}")
-    else:
-        print("No predictions generated for any user")
+    all_predictions = pd.concat(all_predictions, ignore_index=True)
+    all_predictions.to_csv("predictions.csv", index=False)
 
 
 if __name__ == "__main__":

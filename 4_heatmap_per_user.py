@@ -1,6 +1,6 @@
 import pandas as pd
 import time
-from geobleu_seq_eval import calc_geobleu_humob25
+from utils import get_xy_list_from_df_simple, get_algo
 import matplotlib.pyplot as plt
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -10,9 +10,7 @@ def optimize_user_data(user_df):
     """Pre-group user data by day for faster access."""
     grouped = {}
     for day in range(1, 61):
-        day_data = user_df[user_df["day"] == day][
-            ["day", "time", "x", "y"]
-        ].values.tolist()
+        day_data = get_xy_list_from_df_simple(user_df[user_df["day"] == day])
         grouped[day] = day_data
     return grouped
 
@@ -28,10 +26,12 @@ if __name__ == "__main__":
     df["day"] = df["ts"] // 48 + 1
     df["time"] = df["ts"] % 48
 
-    UIDS = list(range(12, 21))
+    filtered_df = df[(df["uid"] <= 60) & (df["day"] <= 60)]
+
+    UIDS = list(range(30, 61))
 
     for uid in UIDS:
-        user_df = df[df["uid"] == uid]
+        user_df = filtered_df[filtered_df["uid"] == uid]
 
         start_time = time.time()
         print(f"Processing user {uid}...")
@@ -53,7 +53,10 @@ if __name__ == "__main__":
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = []
             for day_x, day_y, data_x, data_y in tasks:
-                future = executor.submit(calc_geobleu_humob25, (data_x, data_y))
+                future = executor.submit(
+                    get_algo(),
+                    (data_x, data_y),
+                )
                 futures.append((future, day_x, day_y))
 
             completed = 0

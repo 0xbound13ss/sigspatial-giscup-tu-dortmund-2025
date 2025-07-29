@@ -2,6 +2,7 @@ import pandas as pd
 import time
 from config import settings
 import numpy as np
+from utils import get_algo, get_xy_list_from_df
 
 
 def truncate_by_ts(df):
@@ -204,16 +205,17 @@ def main():
     scores = []
     for i, uid in enumerate(np.random.randint(1, 27001, 3000)):
         # Get user data for prediction and reference
-        pred_user = test_df[test_df["uid"] == uid]
-        ref_user = ref_df[ref_df["uid"] == uid]
+        pred_user = get_xy_list_from_df(test_df, uid)
+        ref_user = get_xy_list_from_df(ref_df, uid)
+        print(f"len pred: {len(pred_user)}, len ref: {len(ref_user)}")
 
         # 1. Use optimized geobleu_by_day
-        from geobleu_optimized import geobleu_by_day
 
-        geobleu_score = geobleu_by_day(
-            pred_traj=pred_user,
-            ref_traj=ref_user,
+        score = get_algo()(
+            (pred_user, ref_user),
         )
+
+        print(f"score: {score:.8f}")
 
         # 2. Use original calc_geobleu (commented out)
         # from geobleu_seq_eval import calc_geobleu
@@ -223,8 +225,8 @@ def main():
         #     processes=4,
         # )
 
-        scores.append(geobleu_score)
-        print(f"Processed {i+1}/3000 users... with GEO-BLEU score: {geobleu_score:.8f}")
+        scores.append(score)
+        print(f"Processed {i+1}/3000 users... with GEO-BLEU score: {score:.8f}")
 
     print(
         f"Calculated GEO-BLEU scores for {len(scores)} users in {time.time() - start_scores:.2f} seconds"

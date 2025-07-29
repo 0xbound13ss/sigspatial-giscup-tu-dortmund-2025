@@ -1,18 +1,16 @@
 import pandas as pd
 import time
-from geobleu_seq_eval import calc_geobleu_humob25
+from utils import get_xy_list_from_df_simple, get_algo
 import matplotlib.pyplot as plt
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-def optimize_day_data(df_filtered, target_day):
+def optimize_day_data(day_df):
     """Pre-group day data by user for faster access."""
     grouped = {}
     for uid in range(1, 61):
-        user_data = df_filtered[
-            (df_filtered["uid"] == uid) & (df_filtered["day"] == target_day)
-        ][["day", "time", "x", "y"]].values.tolist()
+        user_data = get_xy_list_from_df_simple(day_df[day_df["uid"] == uid])
         grouped[uid] = user_data
     return grouped
 
@@ -21,6 +19,14 @@ if __name__ == "__main__":
     start_time = time.time()
     print("Loading the entire dataset...")
     df = pd.read_parquet("city_B_challengedata_converted.parquet")
+    df = df.astype(
+        {
+            "uid": "uint16",  # uid <= 150000
+            "ts": "uint16",  # ts < 3600
+            "x": "uint8",  # 1 <= x <= 200
+            "y": "uint8",  # 1 <= y <= 200
+        }
+    )
     load_time = time.time() - start_time
     print(f"Data loaded in {load_time:.2f} seconds")
     print(f"Loaded {len(df):,} rows")
@@ -28,16 +34,18 @@ if __name__ == "__main__":
     df["day"] = df["ts"] // 48 + 1
     df["time"] = df["ts"] % 48
 
-    # Filter to first 60 users and first 11 days
-    df_filtered = df[(df["uid"] <= 60) & (df["day"] <= 11)]
+    # Filter to first 60 users and first 60 days
+    df_filtered = df[(df["uid"] <= 60) & (df["day"] <= 60)]
 
-    DAYS = list(range(1, 12))
+    DAYS = list(range(1, 61))
 
     for target_day in DAYS:
         start_time = time.time()
         print(f"Processing day {target_day}...")
 
-        user_data = optimize_day_data(df_filtered, target_day)
+        day_df = df_filtered[df_filtered["day"] == target_day]
+
+        user_data = optimize_day_data(day_df)
 
         heatmap = np.zeros((60, 60))
 
@@ -54,8 +62,12 @@ if __name__ == "__main__":
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = []
             for user_y, user_z, data_y, data_z in tasks:
-                print(f"data_y: {data_y}, data_z: {data_z}")
-                future = executor.submit(calc_geobleu_humob25, (data_y, data_z))
+                # print(f"data_{user_y}: {data_y}, data_{user_z}: {data_z}\n\n\n\n\n")
+                future = executor.submit(
+                    get_algo(),
+                    (data_y, data_z),
+                )
+
                 futures.append((future, user_y, user_z))
 
             completed = 0

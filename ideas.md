@@ -84,3 +84,21 @@ rel_ext_q = (xd1, yd1), (xd2, yd2), (xd3, yd3), (xd4, yd4), (xd5, yd5), ...
 
 mean
 mode
+
+09.07.
+similar users mit DTW nicht geo-bleu finden, aber top-k mit geo-bleu evaluieren
+compressed versuchen und heatmap debuggen
+mit ints anstatt floats versuchen
+
+
+in predictor diffs nicht für benachbarte, sondern für diff mit start berechnen
+
+
+23.07
+random picken
+nicht alles in ram halten
+city A !!! evaluieren für midterm eval
+nicht mit k_similar, sondern mit max_dtw = 500 / 1000 begrenzen 
+>= 5 mit <= 500 - so lassen
+<5 mit <= 500 - <= 1000 weiter queryen
+sonst einfach top-5 

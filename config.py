@@ -5,6 +5,12 @@ from pydantic import Field
 class Settings(BaseSettings):
     """Application settings."""
 
+    ALGO_USED: str = Field(
+        "geo_bleu",
+        description="Algorithm used for calculations",
+        choices=["geo_bleu", "dtw"],
+    )
+
     TEST_USERS: int = Field(3000, description="Test users per dataset")
 
     TIMESTAMPS_PER_DAY: int = Field(48, description="Number of timestamps per day")
