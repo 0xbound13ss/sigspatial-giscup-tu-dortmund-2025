@@ -7,3 +7,4 @@ user_visualizations/
 *.parquet
 **/__pycache__/
 *.png
+prediction_plots/

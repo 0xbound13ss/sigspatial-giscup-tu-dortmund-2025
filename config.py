@@ -11,6 +11,7 @@ class Settings(BaseSettings):
         choices=["geo_bleu", "dtw"],
     )
 
+    TRAIN_USERS: int = Field(147000, description="Number of training users")
     TEST_USERS: int = Field(3000, description="Test users per dataset")
 
     TIMESTAMPS_PER_DAY: int = Field(48, description="Number of timestamps per day")
